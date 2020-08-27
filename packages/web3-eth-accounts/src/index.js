@@ -99,9 +99,9 @@ var Accounts = function Accounts() {
 
 Accounts.prototype._addAccountFunctions = function(account) {
     var _this = this;
-    var mainnetAddress = utils.toBech32Address("lat", account.address)
-    var testnetAddress = utils.toBech32Address("lax", account.address)
-    account.address = {"mainnet":mainnetAddress, "testnet": testnetAddress}
+    var address = utils.toBech32Address("lax", account.address);
+    console.log("address: ", address);
+    account.address = address;
     // add sign functions
     account.signTransaction = function signTransaction(tx, callback) {
         return _this.signTransaction(tx, account.privateKey, callback);
@@ -181,9 +181,6 @@ Accounts.prototype.signTransaction = function signTransaction(tx, privateKey, ca
 
             if(transaction.to && utils.isBech32Address(transaction.to)){
                 let hrp = "lax"
-                if(tx.chainId === 100){
-                    hrp = "lat"
-                }
                 transaction.to = utils.decodeBech32Address(hrp, transaction.to)
             }
 
@@ -270,12 +267,7 @@ Accounts.prototype.signTransaction = function signTransaction(tx, privateKey, ca
 
     // Otherwise, get the missing info from the Ethereum Node
     var netType = "mainnet"
-    var bech32Address = ""
-    if(tx.chainId == 100) {
-        bech32Address = _this.privateKeyToAccount(privateKey).address.mainnet
-    } else {
-        bech32Address = _this.privateKeyToAccount(privateKey).address.testnet
-    }
+    var bech32Address = _this.privateKeyToAccount(privateKey).address;
     return Promise.all([
         isNot(tx.chainId) ? _this._ethereumCall.getChainId() : tx.chainId,
         isNot(tx.gasPrice) ? _this._ethereumCall.getGasPrice() : tx.gasPrice,
@@ -492,18 +484,18 @@ Wallet.prototype.add = function(account) {
     if (_.isString(account)) {
         account = this._accounts.privateKeyToAccount(account);
     }
-    if (!this[account.address.testnet]) {
+    if (!this[account.address]) {
         account = this._accounts.privateKeyToAccount(account.privateKey);
         account.index = this._findSafeIndex();
 
         this[account.index] = account;
         //this[account.address.toLowerCase()] = account;
-        this[account.address.testnet] = account;
+        this[account.address] = account;
         this.length++;
 
         return account;
     } else {
-        return this[account.address.testnet];
+        return this[account.address];
     }
 };
 
@@ -512,12 +504,12 @@ Wallet.prototype.remove = function(addressOrIndex) {
 
     if (account && account.address) {
         // address
-        this[account.address.testnet].privateKey = null;
-        delete this[account.address.testnet];
+        this[account.address].privateKey = null;
+        delete this[account.address];
         // address lowercase
         //this[account.address.toLowerCase()].privateKey = null;
         //delete this[account.address.toLowerCase()];
-        
+
         // index
         this[account.index].privateKey = null;
         delete this[account.index];
