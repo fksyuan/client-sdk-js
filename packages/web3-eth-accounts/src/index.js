@@ -29,6 +29,7 @@ var Promise = require('any-promise');
 var Account = require('eth-lib/lib/account');
 var Hash = require('eth-lib/lib/hash');
 var RLP = require('eth-lib/lib/rlp');// jshint ignore:line
+var rlp = require('rlp');
 var Bytes = require('eth-lib/lib/bytes');// jshint ignore:line
 var cryp = (typeof global === 'undefined') ? require('crypto-browserify') : require('crypto');
 var scrypt = require('@web3-js/scrypt-shim');
@@ -36,7 +37,15 @@ var uuid = require('uuid');
 var utils = require('web3-utils');
 var helpers = require('web3-core-helpers');
 var Transaction = require('ethereumjs-tx').Transaction;
+var ethUtil = require("ethereumjs-util");
 var Common = require('ethereumjs-common').default;
+var sm2 = require('@fksyuan/sm-crypto').sm2;
+var sm3 = require('@fksyuan/sm-crypto').sm3;
+var elliptic = require("elliptic");
+var secp256k1 = new elliptic.ec("secp256k1");
+var BN = require('bn.js');
+var Nat = require("eth-lib/lib/nat");
+
 
 
 var isNot = function(value) {
@@ -93,14 +102,25 @@ var Accounts = function Accounts() {
         method.setRequestManager(_this._requestManager);
     });
 
+    this.signType = 'secp256k1';
+    this.hashType = 'sha3';
 
     this.wallet = new Wallet(this);
+};
+
+Accounts.prototype.setSignType = function(signType) {
+    this.signType = signType;
+    return;
+};
+
+Accounts.prototype.setHashType = function(hashType) {
+    this.hashType = hashType;
+    return;
 };
 
 Accounts.prototype._addAccountFunctions = function(account) {
     var _this = this;
     var address = utils.toBech32Address("lax", account.address);
-    console.log("address: ", address);
     account.address = address;
     // add sign functions
     account.signTransaction = function signTransaction(tx, callback) {
@@ -114,16 +134,64 @@ Accounts.prototype._addAccountFunctions = function(account) {
         return _this.encrypt(account.privateKey, password, options);
     };
 
-
     return account;
 };
 
+Accounts.prototype.fromPrivate = function fromPrivate(privateKey) {
+    var publicKey = "";
+    var publicHash = "";
+    var address = "";
+    if (this.signType === 'sm2') {
+        privateKey = privateKey.startsWith('0x') ? privateKey.slice(2) : privateKey;
+        publicKey = "0x" + sm2.getPublicKeyFromPrivateKey(privateKey).slice(2);
+        if (this.hashType === 'sm3') {
+            publicHash = sm3(String.fromCharCode.apply(null, utils.hexToBytes(publicKey)));
+        } else {
+            publicHash = Hash.keccak256(publicKey);
+        }
+        address = "0x" + publicHash.slice(-40);
+        return {
+            address: address,
+            privateKey: privateKey
+        };
+    } else {
+        var buffer = new Buffer(privateKey.slice(2), "hex");
+        var ecKey = secp256k1.keyFromPrivate(buffer);
+        publicKey = "0x" + ecKey.getPublic(false, 'hex').slice(2);
+        if (this.hashType === 'sm3') {
+            publicHash = sm3(String.fromCharCode.apply(null, utils.hexToBytes(publicKey)));
+        } else {
+            publicHash = Hash.keccak256(publicKey);
+        }
+        address = "0x" + publicHash.slice(-40);
+        return {
+            address: address,
+            privateKey: privateKey
+        };
+    }
+};
+
 Accounts.prototype.create = function create(entropy) {
-    return this._addAccountFunctions(Account.create(entropy || utils.randomHex(32)));
+    entropy = entropy || utils.randomHex(32);
+    var innerHex = "";
+    if (this.hashType === 'sm3') {
+        innerHex = sm3(String.fromCharCode.apply(null, Bytes.concat(Bytes.random(32), entropy || Bytes.random(32))));
+    } else {
+        innerHex = Hash.keccak256(Bytes.concat(Bytes.random(32), entropy || Bytes.random(32)));
+    }
+    var middleHex = Bytes.concat(Bytes.concat(Bytes.random(32), innerHex), Bytes.random(32));
+    var outerHex = "";
+    if (this.hashType === 'sm3') {
+        outerHex = sm3(String.fromCharCode.apply(null, middleHex));
+    } else {
+        outerHex = Hash.keccak256(middleHex);
+    }
+    var account = this.fromPrivate(outerHex);
+    return this._addAccountFunctions(account);
 };
 
 Accounts.prototype.privateKeyToAccount = function privateKeyToAccount(privateKey) {
-    return this._addAccountFunctions(Account.fromPrivate(privateKey));
+    return this._addAccountFunctions(this.fromPrivate(privateKey));
 };
 
 Accounts.prototype.signTransaction = function signTransaction(tx, privateKey, callback) {
@@ -142,7 +210,7 @@ Accounts.prototype.signTransaction = function signTransaction(tx, privateKey, ca
         return Promise.reject(error);
     }
 
-    function signed(tx) {
+    function signed (tx, options) {
         if (tx.common && (tx.chain && tx.hardfork)) {
             error = new Error(
                 'Please provide the ethereumjs-common object or the chain and hardfork property but not all together.'
@@ -179,9 +247,9 @@ Accounts.prototype.signTransaction = function signTransaction(tx, privateKey, ca
             transaction.value = transaction.value || '0x';
             transaction.chainId = utils.numberToHex(transaction.chainId);
 
-            if(transaction.to && utils.isBech32Address(transaction.to)){
-                let hrp = "lax"
-                transaction.to = utils.decodeBech32Address(hrp, transaction.to)
+            if(transaction.to && utils.isBech32Address(transaction.to)) {
+                let hrp = "lax";
+                transaction.to = utils.decodeBech32Address(hrp, transaction.to);
             }
 
             // Because tx has no ethereumjs-tx signing options we use fetched vals.
@@ -229,26 +297,98 @@ Accounts.prototype.signTransaction = function signTransaction(tx, privateKey, ca
 
             var ethTx = new Transaction(transaction, transactionOptions);
 
-            ethTx.sign(Buffer.from(privateKey, 'hex'));
+            var result = {};
+            var rlpEncoded = '';
+            var rawTransaction = '';
+            var transactionHash = '';
+            if (options.signType === 'sm2') {
+                var item = ethTx.raw.slice(0, 6).concat([
+                    ethUtil.toBuffer(tx.chainId),
+                    // TODO: stripping zeros should probably be a responsibility of the rlp module
+                    ethUtil.stripZeros(ethUtil.toBuffer(0)),
+                    ethUtil.stripZeros(ethUtil.toBuffer(0)),
+                ]);
+                var txRlp = rlp.encode(item);
+                var msgHash = ""
+                if (options.hashType === 'sm3') {
+                    msgHash = sm3(String.fromCharCode.apply(null, utils.hexToBytes('0x' + txRlp.toString('hex'))));
+                    console.log("msgHash: ", msgHash);
+                } else {
+                    msgHash = utils.keccak256(txRlp);
+                }
+                var sig = _this.sign(msgHash, privateKey);
+                sig.v = utils.numberToHex(utils.hexToNumber(sig.v) + 200*2 + 8);
+                var vrs = {
+                    v: sig.v,
+                    r: sig.r,
+                    s: sig.s
+                };
+                console.log('sig: ', sig);
+                Object.assign(ethTx, vrs);
+                // check gas is enough
+                if (ethTx.getBaseFee().cmp(new BN(ethTx.gasLimit)) > 0) {
+                    throw new Error(`gas limit is too low. Need at least ${ethTx.getBaseFee()}`);
+                }
+                rlpEncoded = ethTx.serialize().toString('hex');
+                rawTransaction = '0x' + rlpEncoded;
+                transactionHash = "";
+                if (options.hashType === 'sm3') {
+                    transactionHash = sm3(String.fromCharCode.apply(null, utils.hexToBytes(rawTransaction)));
+                } else {
+                    transactionHash = utils.keccak256(rawTransaction);
+                }
+                result = {
+                    messageHash: "0x" + msgHash,
+                    v: '0x' + Buffer.from(ethTx.v).toString('hex'),
+                    r: '0x' + Buffer.from(ethTx.r).toString('hex'),
+                    s: '0x' + Buffer.from(ethTx.s).toString('hex'),
+                    rawTransaction: rawTransaction,
+                    transactionHash: '0x' + transactionHash
+                };
+            } else {
+                var item = ethTx.raw.slice(0, 6).concat([
+                    ethUtil.toBuffer(tx.chainId),
+                    // TODO: stripping zeros should probably be a responsibility of the rlp module
+                    ethUtil.stripZeros(ethUtil.toBuffer(0)),
+                    ethUtil.stripZeros(ethUtil.toBuffer(0)),
+                ]);
+                console.log('item1: ', item);
+                var txRlp = rlp.encode(item);
+                var msgHash = ""
+                msgHash = utils.keccak256(txRlp);
+                console.log("msgHash: ", msgHash);
+                var sig = _this.sign(msgHash.slice(2), privateKey);
+                sig.v = utils.numberToHex(utils.hexToNumber(sig.v) + 200*2 + 8);
+                var vrs = {
+                    v: sig.v,
+                    r: sig.r,
+                    s: sig.s
+                };
+                console.log('sig: ', sig)
+                console.log('vrs: ', vrs);
+                Object.assign(ethTx, vrs);
 
-            var validationResult = ethTx.validate(true);
+                // ethTx.sign(Buffer.from(privateKey, 'hex'));
 
-            if (validationResult !== '') {
-                throw new Error('Signer Error: ' + validationResult);
+                var validationResult = ethTx.validate(true);
+
+                if (validationResult !== '') {
+                    throw new Error('Signer Error: ' + validationResult);
+                }
+
+                rlpEncoded = ethTx.serialize().toString('hex');
+                rawTransaction = '0x' + rlpEncoded;
+                transactionHash = utils.keccak256(rawTransaction);
+
+                result = {
+                    messageHash: '0x' + Buffer.from(ethTx.hash(false)).toString('hex'),
+                    v: '0x' + Buffer.from(ethTx.v).toString('hex'),
+                    r: '0x' + Buffer.from(ethTx.r).toString('hex'),
+                    s: '0x' + Buffer.from(ethTx.s).toString('hex'),
+                    rawTransaction: rawTransaction,
+                    transactionHash: transactionHash
+                };
             }
-
-            var rlpEncoded = ethTx.serialize().toString('hex');
-            var rawTransaction = '0x' + rlpEncoded;
-            var transactionHash = utils.keccak256(rawTransaction);
-
-            var result = {
-                messageHash: '0x' + Buffer.from(ethTx.hash(false)).toString('hex'),
-                v: '0x' + Buffer.from(ethTx.v).toString('hex'),
-                r: '0x' + Buffer.from(ethTx.r).toString('hex'),
-                s: '0x' + Buffer.from(ethTx.s).toString('hex'),
-                rawTransaction: rawTransaction,
-                transactionHash: transactionHash
-            };
 
             callback(null, result);
             return result;
@@ -262,11 +402,11 @@ Accounts.prototype.signTransaction = function signTransaction(tx, privateKey, ca
 
     // Resolve immediately if nonce, chainId, price and signing options are provided
     if (tx.nonce !== undefined && tx.chainId !== undefined && tx.gasPrice !== undefined && hasTxSigningOptions) {
-        return Promise.resolve(signed(tx));
+        return Promise.resolve(signed(tx, {'signType': _this.signType, 'hashType': _this.hashType}));
     }
 
     // Otherwise, get the missing info from the Ethereum Node
-    var netType = "mainnet"
+    var netType = "mainnet";
     var bech32Address = _this.privateKeyToAccount(privateKey).address;
     return Promise.all([
         isNot(tx.chainId) ? _this._ethereumCall.getChainId() : tx.chainId,
@@ -278,7 +418,7 @@ Accounts.prototype.signTransaction = function signTransaction(tx, privateKey, ca
         if (isNot(args[0]) || isNot(args[1]) || isNot(args[2]) || isNot(args[3])) {
             throw new Error('One of the values "chainId", "networkId", "gasPrice", or "nonce" couldn\'t be fetched: ' + JSON.stringify(args));
         }
-        return signed(_.extend(tx, {chainId: args[0], gasPrice: args[1], nonce: args[2], networkId: args[3]}));
+        return signed(_.extend(tx, {chainId: args[0], gasPrice: args[1], nonce: args[2], networkId: args[3]}), {'signType': _this.signType, 'hashType': _this.hashType});
     });
 };
 
@@ -300,21 +440,45 @@ Accounts.prototype.hashMessage = function hashMessage(data) {
     var preamble = '\x19Ethereum Signed Message:\n' + message.length;
     var preambleBuffer = Buffer.from(preamble);
     var ethMessage = Buffer.concat([preambleBuffer, messageBuffer]);
-    return Hash.keccak256s(ethMessage);
+    if (this.hashType === 'sm3') {
+        return sm3(ethMessage.toString());
+    } else {
+        return Hash.keccak256s(ethMessage);
+    }
 };
 
 Accounts.prototype.sign = function sign(data, privateKey) {
     var hash = this.hashMessage(data);
-    var signature = Account.sign(hash, privateKey);
-    var vrs = Account.decodeSignature(signature);
-    return {
-        message: data,
-        messageHash: hash,
-        v: vrs[0],
-        r: vrs[1],
-        s: vrs[2],
-        signature: signature
-    };
+    var signature = "";
+    var vrs = null;
+    if (this.signType === 'sm2') {
+        signature = sm2.doSignature(hash, privateKey);
+        const decodeSignature = hex => [Bytes.slice(0, 32, hex), Bytes.slice(32, 64, hex), Bytes.slice(64, Bytes.length(hex), hex)];
+        const encodeSignature = ([v, r, s]) => Bytes.flatten([r, s, v]);
+        vrs = decodeSignature('0x' + signature);
+        console.log("vrs: ", vrs, utils.hexToNumber(vrs[2]) + 27);
+        return {
+            message: data,
+            messageHash: hash,
+            v: utils.numberToHex(utils.hexToNumber(vrs[2]) + 27),
+            r: vrs[0],
+            s: vrs[1],
+            signature: encodeSignature([Nat.fromString(Bytes.fromNumber(utils.hexToNumber(vrs[2]) + 27)), Bytes.pad(32, Bytes.fromNat(vrs[0])), Bytes.pad(32, Bytes.fromNat(vrs[1]))])
+        };
+    } else {
+        signature = Account.sign(hash, privateKey);
+        console.log('signature: ',signature);
+        vrs = Account.decodeSignature(signature);
+        return {
+            message: data,
+            messageHash: hash,
+            v: vrs[0],
+            r: vrs[1],
+            s: vrs[2],
+
+            signature: signature
+        };
+    }
 };
 
 Accounts.prototype.recover = function recover(message, signature, preFixed) {
@@ -373,7 +537,12 @@ Accounts.prototype.decrypt = function(v3Keystore, password, nonStrict) {
 
     var ciphertext = Buffer.from(json.crypto.ciphertext, 'hex');
 
-    var mac = utils.sha3(Buffer.concat([derivedKey.slice(16, 32), ciphertext])).replace('0x', '');
+    var mac = "";
+    if (this.hashType === 'sm3') {
+        mac = sm3(String.fromCharCode.apply(null, utils.hexToBytes("0x" + Buffer.concat([derivedKey.slice(16, 32), ciphertext]).toString('hex'))));
+    } else {
+        mac = utils.sha3(Buffer.concat([derivedKey.slice(16, 32), ciphertext])).replace('0x', '');
+    }
     if (mac !== json.crypto.mac) {
         throw new Error('Key derivation failed - possibly wrong password');
     }
@@ -420,7 +589,12 @@ Accounts.prototype.encrypt = function(privateKey, password, options) {
 
     var ciphertext = Buffer.concat([cipher.update(Buffer.from(account.privateKey.replace('0x', ''), 'hex')), cipher.final()]);
 
-    var mac = utils.sha3(Buffer.concat([derivedKey.slice(16, 32), Buffer.from(ciphertext, 'hex')])).replace('0x', '');
+    var mac = "";
+    if (this.hashType === 'sm3') {
+        mac = sm3(String.fromCharCode.apply(null, utils.hexToBytes("0x" + Buffer.concat([derivedKey.slice(16, 32), Buffer.from(ciphertext, 'hex')]).toString('hex'))));
+    } else {
+        mac = utils.sha3(Buffer.concat([derivedKey.slice(16, 32), Buffer.from(ciphertext, 'hex')])).replace('0x', '');
+    }
 
     return {
         version: 3,
