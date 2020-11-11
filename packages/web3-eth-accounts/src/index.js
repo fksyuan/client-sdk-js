@@ -312,11 +312,10 @@ Accounts.prototype.signTransaction = function signTransaction(tx, privateKey, ca
                 var msgHash = ""
                 if (options.hashType === 'sm3') {
                     msgHash = sm3(String.fromCharCode.apply(null, utils.hexToBytes('0x' + txRlp.toString('hex'))));
-                    console.log("msgHash: ", msgHash);
                 } else {
                     msgHash = utils.keccak256(txRlp);
                 }
-                var signature = sm2.doSignature('0x' + msgHash, privateKey);
+                var signature = sm2.doSignature(hexToArray(msgHash), privateKey);
                 const decodeSignature = hex => [Bytes.slice(0, 32, hex), Bytes.slice(32, 64, hex), Bytes.slice(64, Bytes.length(hex), hex)];
                 const encodeSignature = ([v, r, s]) => Bytes.flatten([r, s, v]);
                 var vrs = decodeSignature('0x' + signature);
@@ -334,7 +333,6 @@ Accounts.prototype.signTransaction = function signTransaction(tx, privateKey, ca
                     r: sig.r,
                     s: sig.s
                 };
-                console.log('sig: ', sig);
                 Object.assign(ethTx, vrs);
                 // check gas is enough
                 if (ethTx.getBaseFee().cmp(new BN(ethTx.gasLimit)) > 0) {
@@ -448,7 +446,7 @@ Accounts.prototype.sign = function sign(data, privateKey) {
         console.log("vrs: ", vrs, utils.hexToNumber(vrs[2]) + 27);
         return {
             message: data,
-            messageHash: hash,
+            messageHash: data,
             v: utils.numberToHex(utils.hexToNumber(vrs[2]) + 27),
             r: vrs[0],
             s: vrs[1],
@@ -782,5 +780,20 @@ function storageAvailable(type) {
     }
 }
 
+function hexToArray(hexStr) {
+    const words = []
+    let hexStrLength = hexStr.length
+
+    if (hexStrLength % 2 !== 0) {
+        hexStr = leftPad(hexStr, hexStrLength + 1)
+    }
+
+    hexStrLength = hexStr.length
+
+    for (let i = 0; i < hexStrLength; i += 2) {
+        words.push(parseInt(hexStr.substr(i, 2), 16))
+    }
+    return words
+}
 
 module.exports = Accounts;
