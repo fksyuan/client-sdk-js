@@ -316,9 +316,20 @@ Accounts.prototype.signTransaction = function signTransaction(tx, privateKey, ca
                 } else {
                     msgHash = utils.keccak256(txRlp);
                 }
-                var sig = _this.sign(msgHash, privateKey);
+                var signature = sm2.doSignature('0x' + msgHash, privateKey);
+                const decodeSignature = hex => [Bytes.slice(0, 32, hex), Bytes.slice(32, 64, hex), Bytes.slice(64, Bytes.length(hex), hex)];
+                const encodeSignature = ([v, r, s]) => Bytes.flatten([r, s, v]);
+                var vrs = decodeSignature('0x' + signature);
+                var sig = {
+                    messageHash: msgHash,
+                    v: utils.numberToHex(utils.hexToNumber(vrs[2]) + 27),
+                    r: vrs[0],
+                    s: vrs[1],
+                    signature: encodeSignature([Nat.fromString(Bytes.fromNumber(utils.hexToNumber(vrs[2]) + 27)), Bytes.pad(32, Bytes.fromNat(vrs[0])), Bytes.pad(32, Bytes.fromNat(vrs[1]))])
+                }
+                // var sig = _this.sign(msgHash, privateKey);
                 sig.v = utils.numberToHex(utils.hexToNumber(sig.v) + 200*2 + 8);
-                var vrs = {
+                vrs = {
                     v: sig.v,
                     r: sig.r,
                     s: sig.s
@@ -346,29 +357,7 @@ Accounts.prototype.signTransaction = function signTransaction(tx, privateKey, ca
                     transactionHash: '0x' + transactionHash
                 };
             } else {
-                var item = ethTx.raw.slice(0, 6).concat([
-                    ethUtil.toBuffer(tx.chainId),
-                    // TODO: stripping zeros should probably be a responsibility of the rlp module
-                    ethUtil.stripZeros(ethUtil.toBuffer(0)),
-                    ethUtil.stripZeros(ethUtil.toBuffer(0)),
-                ]);
-                console.log('item1: ', item);
-                var txRlp = rlp.encode(item);
-                var msgHash = ""
-                msgHash = utils.keccak256(txRlp);
-                console.log("msgHash: ", msgHash);
-                var sig = _this.sign(msgHash.slice(2), privateKey);
-                sig.v = utils.numberToHex(utils.hexToNumber(sig.v) + 200*2 + 8);
-                var vrs = {
-                    v: sig.v,
-                    r: sig.r,
-                    s: sig.s
-                };
-                console.log('sig: ', sig)
-                console.log('vrs: ', vrs);
-                Object.assign(ethTx, vrs);
-
-                // ethTx.sign(Buffer.from(privateKey, 'hex'));
+                ethTx.sign(Buffer.from(privateKey, 'hex'));
 
                 var validationResult = ethTx.validate(true);
 
@@ -452,7 +441,7 @@ Accounts.prototype.sign = function sign(data, privateKey) {
     var signature = "";
     var vrs = null;
     if (this.signType === 'sm2') {
-        signature = sm2.doSignature(hash, privateKey);
+        signature = sm2.doSignature(data, privateKey);
         const decodeSignature = hex => [Bytes.slice(0, 32, hex), Bytes.slice(32, 64, hex), Bytes.slice(64, Bytes.length(hex), hex)];
         const encodeSignature = ([v, r, s]) => Bytes.flatten([r, s, v]);
         vrs = decodeSignature('0x' + signature);
