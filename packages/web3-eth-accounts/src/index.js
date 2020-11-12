@@ -45,7 +45,7 @@ var elliptic = require("elliptic");
 var secp256k1 = new elliptic.ec("secp256k1");
 var BN = require('bn.js');
 var Nat = require("eth-lib/lib/nat");
-
+var sm2Util = require('@fksyuan/sm-crypto/src/sm2/utils');
 
 
 var isNot = function(value) {
@@ -175,14 +175,14 @@ Accounts.prototype.create = function create(entropy) {
     entropy = entropy || utils.randomHex(32);
     var innerHex = "";
     if (this.hashType === 'sm3') {
-        innerHex = sm3(String.fromCharCode.apply(null, Bytes.concat(Bytes.random(32), entropy || Bytes.random(32))));
+        innerHex = sm3(String.fromCharCode.apply(null, utils.hexToBytes(Bytes.concat(Bytes.random(32), entropy || Bytes.random(32)))));
     } else {
         innerHex = Hash.keccak256(Bytes.concat(Bytes.random(32), entropy || Bytes.random(32)));
     }
     var middleHex = Bytes.concat(Bytes.concat(Bytes.random(32), innerHex), Bytes.random(32));
     var outerHex = "";
     if (this.hashType === 'sm3') {
-        outerHex = sm3(String.fromCharCode.apply(null, middleHex));
+        outerHex = sm3(String.fromCharCode.apply(null, utils.hexToBytes(middleHex)));
     } else {
         outerHex = Hash.keccak256(middleHex);
     }
@@ -304,18 +304,17 @@ Accounts.prototype.signTransaction = function signTransaction(tx, privateKey, ca
             if (options.signType === 'sm2') {
                 var item = ethTx.raw.slice(0, 6).concat([
                     ethUtil.toBuffer(tx.chainId),
-                    // TODO: stripping zeros should probably be a responsibility of the rlp module
                     ethUtil.stripZeros(ethUtil.toBuffer(0)),
                     ethUtil.stripZeros(ethUtil.toBuffer(0)),
                 ]);
                 var txRlp = rlp.encode(item);
-                var msgHash = ""
+                var msgHash = "";
                 if (options.hashType === 'sm3') {
                     msgHash = sm3(String.fromCharCode.apply(null, utils.hexToBytes('0x' + txRlp.toString('hex'))));
                 } else {
                     msgHash = utils.keccak256(txRlp);
                 }
-                var signature = sm2.doSignature(hexToArray(msgHash), privateKey);
+                var signature = sm2.doSignature(sm2Util.hexToArray(msgHash), privateKey);
                 const decodeSignature = hex => [Bytes.slice(0, 32, hex), Bytes.slice(32, 64, hex), Bytes.slice(64, Bytes.length(hex), hex)];
                 const encodeSignature = ([v, r, s]) => Bytes.flatten([r, s, v]);
                 var vrs = decodeSignature('0x' + signature);
@@ -327,7 +326,7 @@ Accounts.prototype.signTransaction = function signTransaction(tx, privateKey, ca
                     signature: encodeSignature([Nat.fromString(Bytes.fromNumber(utils.hexToNumber(vrs[2]) + 27)), Bytes.pad(32, Bytes.fromNat(vrs[0])), Bytes.pad(32, Bytes.fromNat(vrs[1]))])
                 }
                 // var sig = _this.sign(msgHash, privateKey);
-                sig.v = utils.numberToHex(utils.hexToNumber(sig.v) + 200*2 + 8);
+                sig.v = utils.numberToHex(utils.hexToNumber(sig.v) + tx.chainId*2 + 8);
                 vrs = {
                     v: sig.v,
                     r: sig.r,
@@ -439,14 +438,13 @@ Accounts.prototype.sign = function sign(data, privateKey) {
     var signature = "";
     var vrs = null;
     if (this.signType === 'sm2') {
-        signature = sm2.doSignature(data, privateKey);
+        signature = sm2.doSignature(hash, privateKey);
         const decodeSignature = hex => [Bytes.slice(0, 32, hex), Bytes.slice(32, 64, hex), Bytes.slice(64, Bytes.length(hex), hex)];
         const encodeSignature = ([v, r, s]) => Bytes.flatten([r, s, v]);
         vrs = decodeSignature('0x' + signature);
-        console.log("vrs: ", vrs, utils.hexToNumber(vrs[2]) + 27);
         return {
             message: data,
-            messageHash: data,
+            messageHash: hash,
             v: utils.numberToHex(utils.hexToNumber(vrs[2]) + 27),
             r: vrs[0],
             s: vrs[1],
@@ -454,7 +452,6 @@ Accounts.prototype.sign = function sign(data, privateKey) {
         };
     } else {
         signature = Account.sign(hash, privateKey);
-        console.log('signature: ',signature);
         vrs = Account.decodeSignature(signature);
         return {
             message: data,
@@ -778,22 +775,6 @@ function storageAvailable(type) {
             // acknowledge QuotaExceededError only if there's something already stored
             (storage && storage.length !== 0);
     }
-}
-
-function hexToArray(hexStr) {
-    const words = []
-    let hexStrLength = hexStr.length
-
-    if (hexStrLength % 2 !== 0) {
-        hexStr = leftPad(hexStr, hexStrLength + 1)
-    }
-
-    hexStrLength = hexStr.length
-
-    for (let i = 0; i < hexStrLength; i += 2) {
-        words.push(parseInt(hexStr.substr(i, 2), 16))
-    }
-    return words
 }
 
 module.exports = Accounts;
